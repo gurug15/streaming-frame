@@ -2,50 +2,36 @@ import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
 import { getData, getFrameFile } from './xtcParser';
+import { jwtAuth } from '../middleware/jwtAuth';
 
 const router = Router();
 
 // ============ HELPERS ============
 
 /**
- * Recursively find a file by name under a root directory.
- * Returns the full path if found, or null.
+ * Build the user-specific input directory path:
+ *   <TRAJDIR>/<email>/gromacs/inputfiles/
  */
-function findFileRecursive(dir: string, filename: string): string | null {
-    try {
-        const entries = fs.readdirSync(dir, { withFileTypes: true });
-        for (const entry of entries) {
-            const fullPath = path.join(dir, entry.name);
-            if (entry.isDirectory()) {
-                const found = findFileRecursive(fullPath, filename);
-                if (found) return found;
-            } else if (entry.name === filename) {
-                return fullPath;
-            }
-        }
-    } catch {
-        // Permission errors or missing dirs — skip
-    }
-    return null;
-}
-
-/**
- * Resolve a trajectory filename to a full path under TRAJDIR.
- */
-function resolveTrajectoryPath(filename: string): string | null {
+function getUserInputDir(email: string): string {
     const trajDir = process.env.TRAJDIR;
     if (!trajDir) {
         throw new Error('TRAJDIR environment variable is not set');
     }
+    return path.join(trajDir, email, 'gromacs', 'inputfiles');
+}
 
-    // Try direct path first
-    const directPath = path.join(trajDir, filename);
-    if (fs.existsSync(directPath)) {
-        return directPath;
+/**
+ * Resolve a trajectory filename to a full path under the user's input directory.
+ */
+function resolveTrajectoryPath(email: string, filename: string): string | null {
+    const userDir = getUserInputDir(email);
+
+    const filePath = path.join(userDir, filename);
+    if (fs.existsSync(filePath)) {
+        return filePath;
     }
 
-    // Search recursively
-    return findFileRecursive(trajDir, filename);
+    return null;
 }
 
 // ============ OFFSET CACHE ============
@@ -53,15 +39,17 @@ function resolveTrajectoryPath(filename: string): string | null {
 const offsetCache = new Map<string, number[]>();
 
 // ============ ROUTES ============
+// All trajectory routes require JWT authentication
 
 /**
  * GET /trajectory/:filename/start
  * Returns an array of byte offsets for each frame in the XTC file.
  */
-router.get('/trajectory/:filename/start', async (req: Request, res: Response): Promise<void> => {
+router.get('/trajectory/:filename/start', jwtAuth, async (req: Request, res: Response): Promise<void> => {
     try {
         const filename = req.params.filename as string;
-        const filePath = resolveTrajectoryPath(filename);
+        const email = (req as any).userEmail as string;
+        const filePath = resolveTrajectoryPath(email, filename);
 
         if (!filePath) {
             res.status(404).json({ error: `Trajectory file not found: ${filename}` });
@@ -74,7 +62,7 @@ router.get('/trajectory/:filename/start', async (req: Request, res: Response): P
             return;
         }
 
-        console.log(`[offsets] Scanning: ${filePath}`);
+        console.log(`[offsets] User: ${email} | Scanning: ${filePath}`);
         const startTime = performance.now();
 
         const offsets = await getData(filePath);
@@ -95,9 +83,10 @@ router.get('/trajectory/:filename/start', async (req: Request, res: Response): P
  * Reads bytes [start, end) from the XTC file, parses the frame(s), and returns them.
  * Response matches the FrameResponse type expected by the frontend.
  */
-router.get('/trajectory/:filename/offset/:start/:end', async (req: Request, res: Response): Promise<void> => {
+router.get('/trajectory/:filename/offset/:start/:end', jwtAuth, async (req: Request, res: Response): Promise<void> => {
     try {
         const filename = req.params.filename as string;
+        const email = (req as any).userEmail as string;
         const startOffset = parseInt(req.params.start as string, 10);
         const endOffset = parseInt(req.params.end as string, 10);
 
@@ -106,7 +95,7 @@ router.get('/trajectory/:filename/offset/:start/:end', async (req: Request, res:
             return;
         }
 
-        const filePath = resolveTrajectoryPath(filename as string);
+        const filePath = resolveTrajectoryPath(email, filename);
 
         if (!filePath) {
             res.status(404).json({ error: `Trajectory file not found: ${filename}` });
